@@ -4,6 +4,7 @@ from qiskit import QuantumCircuit, transpile
 from qiskit.providers.aer import QasmSimulator
 from itertools import product
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from args import parse_args
 from helper import HS, c2s, state_to_str, str_to_state, state_to_ind, ind_to_state, sigma_id, sigma_sx, sigma_sy, sigma_sz
@@ -13,7 +14,7 @@ class QITE:
    def __init__(self, args, hamiltonian):
       # Quantum Circuit
       self.num_qubits = args.num_qubits
-      assert hamiltonian.shape[0] == hamiltonian.shape[1] == 2 ** self.num_qubits == 2
+      assert hamiltonian.shape[0] == hamiltonian.shape[1] == 2 ** self.num_qubits # == 2
 
       # Simulation
       self.num_steps = args.num_steps
@@ -30,15 +31,34 @@ class QITE:
       self.sz = sigma_sz
       self.idx = idx
       self.coeff = coeff
-      self.hamiltonian_decomp = self.decompose_hamiltonian()
-      self.sigma_states = np.array([[0],[1],[2],[3]])
+      pauli_states = [[0,1,2,3]]
+      sigma_states = np.stack(np.meshgrid(*(self.num_qubits*pauli_states)), -1).reshape(-1, self.num_qubits) # list(product(*(pauli_states*self.num_qubits)))
+      sigma_states[:, [0,1]] = sigma_states[:, [1,0]]
+      self.sigma_states = sigma_states
+      # self.num_sigma_states = int( (2 ** (self.num_qubits-1)) * (2 ** self.num_qubits - 1) ) # <- only used if ignoring states with odd # Y_hat 
+      self.num_sigma_states = 4 ** self.num_qubits
+      self.hamiltonian_decomp = {}
 
       # Measurement
       self.sigma_expectations = np.zeros((4,) * self.num_qubits, dtype=complex)
       self.alist = []
 
+      # Debug
+      self.b = np.zeros([self.num_sigma_states],dtype=complex)
+      self.S = np.zeros([self.num_sigma_states, self.num_sigma_states],dtype=complex)
+      self.sqrt_c = 0
+
    def str_to_state(self, str_state):
       return str_to_state(str_state, self.num_qubits)
+
+   def state_to_str(self, state):
+      return state_to_str(state)
+
+   def kron_list(self, kron_list):
+      out = np.eye(1)
+      for mat in kron_list:
+         out = np.kron(out, mat)
+      return out
 
    def decompose_hamiltonian(self):
       """
@@ -47,93 +67,72 @@ class QITE:
       """
       hamiltonian_decomp = {}    # to store results
       S = [self.id, self.sx, self.sy, self.sz]
-      labels = ['0', '1', '2', '3']
-      # print("Tensor product decomposition of Hamiltonian:")
-      
-      if self.hamiltonian.shape[0] == 2: # 2x2 matrix for 1 qubit
-         entries = np.zeros(4,dtype=complex)
-         entries[0] = (self.hamiltonian[0,0] + self.hamiltonian[1,1])/2
-         entries[1] = (self.hamiltonian[0,1] + self.hamiltonian[1,0])/2
-         entries[2] = (self.hamiltonian[0,1] - self.hamiltonian[1,0])*1j/2
-         entries[3] = (self.hamiltonian[0,0] - self.hamiltonian[1,1])/2
-         for i in range(4):
-            if entries[i] >= 1E-10:
-               hamiltonian_decomp[str(i)] = entries[i]
-
-      elif self.hamiltonian.shape[0] == 4: # 4x4 matrix for 2 qubits
-         for i in range(4):
-            for j in range(4):
-                  label = labels[i]+',' + labels[j]
-                  a_ij = 0.25 * HS(np.kron(S[i], S[j]), self.hamiltonian)
-                  if abs(a_ij) >= 1E-10:
-                     # print("%s\t*\t( %s )" % (c2s(a_ij), label))   # save as string
-                     hamiltonian_decomp[label] = float(a_ij)
-                     
-      elif self.hamiltonian.shape[0] == 16: # 16x16 matrix for 4 qubits
-         for i in range(4):
-            for j in range(4):
-                  for k in range(4):
-                     for l in range(4):
-                        label = labels[i]+',' + labels[j]+','+ labels[k] +',' + labels[l] 
-                        a_ij = 1/16 * HS(np.kron(np.kron(S[i], S[j]),np.kron(S[k], S[l])), self.hamiltonian)
-                        if abs(a_ij) >= 1E-10:
-                           # print("%s\t*\t( %s )" % (c2s(a_ij), label))
-                           hamiltonian_decomp[label] = float(a_ij)
-      # print("~~~ End ~~~")
+      norm_factor = 1/ (2 ** self.num_qubits)
+      for state in self.sigma_states:
+         label = self.state_to_str(state)
+         a_ij = norm_factor * HS(self.kron_list([S[i] for i in state]), self.hamiltonian)
+         if abs(a_ij) >= 1E-10:
+            hamiltonian_decomp[label] = float(a_ij)
       return hamiltonian_decomp
 
    def propagate(self):
       qc = QuantumCircuit(self.num_qubits, self.num_qubits)
       for t in range(len(self.alist)):
-         for gate in range(1,4):
-            angle = np.real(self.alist[t][gate])
-            if gate == 1:
-               qc.u(angle,-np.pi/2,np.pi/2, 0) # RX(angle,qbits[0])
-            elif gate == 2:
-               qc.u(angle,0,0, 0)# RY(angle,qbits[0])
-            elif gate == 3:
-               qc.p(angle,0)
+         x = self.alist[t]
+         for ind, sigma_state in enumerate(self.sigma_states):
+            angle = x[ind]
+            # if np.abs(angle) <= 1e-10:
+            #    continue
+            for qubit, gate in enumerate(sigma_state):
+               if gate == 1:
+                  qc.rx(angle, qubit) # RX(angle,qbits[0])
+               elif gate == 2:
+                  qc.ry(angle, qubit) # RY(angle,qbits[0])
+               elif gate == 3:
+                  qc.rz(angle, qubit) # RZ(angle,qbits[0])
       return qc
 
    def measure(self, qc, sigma_state: np.ndarray):
       """0=I, 1=X, 2=Y, 3=Z"""
-      assert self.num_qubits == 1
+      # If all identity gate applied to all qubits, then skip
+      if sum(sigma_state) == 0:
+         return 1
 
       # Building quantum circuit
-      # qc = QuantumCircuit(self.num_qubits, self.num_qubits)
-      idx = sigma_state[0]
-      # print(f"idx: {idx}")
-      if idx == 0:
-         return 1
-      if idx == 1:
-         qc.h(0)
-         qc.measure([0],[0])
-      elif idx == 2:
-         qc.u(np.pi/2,-np.pi/2,np.pi/2, 0) # rotation about x-axis by pi/2
-         qc.measure([0],[0])
-      elif idx == 3:
-         qc.measure([0],[0])
+      for qubit in range(self.num_qubits):
+         idx = sigma_state[qubit]
+         if idx == 1:
+            qc.h(qubit)
+         elif idx == 2:
+            qc.u2(0, np.pi/2, qubit) # rotation about x-axis by pi/2 - WAS: qc.u(np.pi/2,-np.pi/2,np.pi/2, qubit)
+      qubit_list = np.arange(self.num_qubits).tolist()
+      qc.measure(qubit_list, qubit_list)
 
       # Simulating
       exe = transpile(qc, self.simulator)
       result = self.simulator.run(exe, shots=self.shots).result()
       counts = result.get_counts(exe)
-      # print(counts)
+
+      # Calculating probs
       probs = {}
-      for state in ['0', '1']:
+      states = [np.binary_repr(i, width=self.num_qubits) for i in np.arange(2 ** self.num_qubits)]
+      for state in states:
          if state in counts.keys():
             probs[state] = counts[state]/self.shots
          else:
             probs[state] = 0
-      Z_expectation = probs['0'] - probs['1']
+
+      # Calculating expectation
+      sign = {state: (-1) ** (state.count('1') % 2) for state in states}
+      Z_expectation = 0
+      for state in states:
+         Z_expectation += sign[state] * probs[state]
       return Z_expectation
 
    def update_sigma_expectation(self):
-      # qc = self.propagate()
       for sigma_state in self.sigma_states:
-         # qc_copy = qc.copy()
          qc = self.propagate()
-         self.sigma_expectations[sigma_state] = self.measure(qc, sigma_state)
+         self.sigma_expectations[tuple(sigma_state)] = self.measure(qc, sigma_state)
 
    def measure_energy(self):
       energy = 0
@@ -142,60 +141,72 @@ class QITE:
          energy += coef * self.measure(qc, self.str_to_state(sigma_state))
       return energy
 
-   def update_alist(self, ham):
+   def update_alist(self, ham, verbose=False):
       # Obtain A[m]
       # Step 1: Obtain S matrix
-      S = np.zeros([4**self.num_qubits,4**self.num_qubits], dtype=complex)
-      for row_state in self.sigma_states:
-         for col_state in self.sigma_states:
-            row_ind = state_to_ind(row_state)
-            col_ind = state_to_ind(col_state)
-            idx_ind = np.array([self.idx[i,j] for i,j in zip(row_state, col_state)])
+      self.S = np.zeros([self.num_sigma_states, self.num_sigma_states], dtype=complex)
+      for row_ind, row_state in enumerate(self.sigma_states):
+         for col_ind, col_state in enumerate(self.sigma_states):
+            idx_ind = tuple([self.idx[i,j] for i,j in zip(row_state, col_state)])
             coeffs = np.array([self.coeff[i,j] for i,j in zip(row_state, col_state)])
             coef = np.prod(coeffs)
-            S[row_ind,col_ind] = self.sigma_expectations[idx_ind] * coef
+            self.S[row_ind,col_ind] = self.sigma_expectations[idx_ind] * coef
+
+      if verbose:
+         print(self.S)
 
       # Step 2: Obtain b vector
-      b = np.zeros([4 ** self.num_qubits],dtype=complex)
+      self.b = np.zeros([self.num_sigma_states],dtype=complex)
       c = 1
-      # print(hm[0])
       for sigma_state, coef in ham.items():
-         # print('state:')
-         # print(self.str_to_state(sigma_state))
          c -= 2*self.db * coef * self.sigma_expectations[self.str_to_state(sigma_state)]
-      # print('here')
-      sqrt_c = np.sqrt(c)
-      print(f"sqrt_c: {sqrt_c}")
-      for sigma_state in self.sigma_states:
-         ind = state_to_ind(sigma_state)
-         b[ind] += self.sigma_expectations[sigma_state]*(1/sqrt_c-1)/(self.db)
+      self.sqrt_c = sqrt_c = np.sqrt(c)
+
+      if verbose:
+         print(self.sqrt_c)
+
+      # print(f"sqrt_c: {sqrt_c}")
+      for ind, sigma_state in enumerate(self.sigma_states):
+         if verbose:
+            print(f"sigma_state: {tuple(sigma_state)}")
+         # ind = state_to_ind(sigma_state)
+         self.b[ind] += self.sigma_expectations[tuple(sigma_state)]*(1/sqrt_c-1)/(self.db)
          for ham_sigma_state, ham_coef in ham.items():
             ham_state = self.str_to_state(ham_sigma_state)
-            print("sigma_state: ", end='')
-            print(sigma_state)
-            print("ham_state: ", end='')
-            print(ham_state)
-            idx_ind = np.array([self.idx[i,j] for i,j in zip(sigma_state, ham_state)])
-            print(f"idx_ind: {idx_ind}")
-            coeffs = np.array([self.coeff[i,j] for i,j in zip(sigma_state, ham_state)])
-            coef = np.prod(coeffs)
-            print(f"coef: {coef}")
-            print(f"sigma_expectation: {self.sigma_expectations[idx_ind]}")
-            b[ind] -= ham_coef * coef * self.sigma_expectations[idx_ind] / sqrt_c
-         print(f"b[{ind}] = {b[ind]}")
-         b[ind] = 1j*b[ind] - 1j*np.conj(b[ind])
-         print(f"b[{ind}] = {b[ind]}")
+            idx_ind = tuple([self.idx[i,j] for i,j in zip(sigma_state, ham_state)])
+            
+            if verbose:
+               print(f"idx_ind: {idx_ind}")
+
+            coefs = np.array([self.coeff[i,j] for i,j in zip(sigma_state, ham_state)])
+            if verbose:
+               print(coefs)
+            coef = np.prod(coefs)
+
+            if verbose:
+               print(f"ham_coef: {ham_coef}")
+               print(f"coef: {coef}")
+               print(f"self.sigma_expectations[idx_ind] / sqrt_c: {self.sigma_expectations[idx_ind] / sqrt_c}")
+               print(f"-=: {ham_coef * coef * self.sigma_expectations[idx_ind] / sqrt_c}")
+            self.b[ind] -= ham_coef * coef * self.sigma_expectations[idx_ind] / sqrt_c
+
+      if verbose:
+         print(self.b)
+
+      self.b = -2 * self.b.imag
+
+      if verbose:
+         print(self.b)
 
       # Step 3: Add regularizer
-      dalpha = np.eye(4) * self.delta
-
-      # print(b)
+      dalpha = np.eye(self.num_sigma_states) * self.delta
 
       # Step 4: Solve for linear equation, the solution is multiplied by -2 because of the definition of unitary rotation gates is exp(-i theta/2)
-      x = np.linalg.lstsq(S+np.transpose(S)+dalpha,-b,rcond=-1)[0]
-      self.alist.append([])
-      for i in range(len(x)):
-         self.alist[-1].append(-x[i]*2*self.db)
+      x = np.linalg.lstsq(self.S+np.transpose(self.S)+dalpha,-self.b,rcond=-1)[0]
+      self.alist.append((-(x.real)*2*self.db).tolist())
+
+      if verbose:
+         print(x)
 
    def qite_step(self):
       for sigma_state, coef in self.hamiltonian_decomp.items():
@@ -204,6 +215,7 @@ class QITE:
          self.update_alist(ham)
 
    def run(self):
+      self.hamiltonian_decomp = self.decompose_hamiltonian()
       E = np.zeros([self.num_steps+1],dtype=complex)
       E[0] = self.measure_energy()
 
@@ -213,16 +225,42 @@ class QITE:
          E[i] = self.measure_energy()
       return E, self.alist
 
+   def run_from_alist(self, alist):
+      my_alist = self.alist
+      n_steps = len(alist)
+      E = np.zeros(n_steps+1)
+      for step in range(n_steps):
+         self.alist = alist[:step]
+         E[step+1] = self.measure_energy()
+      self.alist = my_alist
+      return E
+
+
 if __name__ == '__main__':
    args = parse_args()
 
    # Build task
-   if args.task == "demo" and args.num_qubits == 1:
-      hamiltonian = 1 * sigma_sx + 1 * sigma_sz 
+   if args.task == "demo":
+      if args.num_qubits == 1:
+         hamiltonian = 1 * sigma_sx - 0.5 * sigma_sy + 1 * sigma_sz 
+      elif args.num_qubits == 2:
+         hamiltonian = np.kron(sigma_id, sigma_sz)
+      elif args.num_qubits == 3:
+         hamiltonian = np.kron(np.kron(sigma_id, sigma_sx), sigma_sy)
 
    qite = QITE(args, hamiltonian)
    print(qite.hamiltonian_decomp)
+   qc = qite.propagate()
+   qc.draw(output='mpl')
+   plt.savefig('qite_circuit0.png')
+   plt.close()
    ground_energy, ground_state = qite.run()
-   print(qite.alist)
+   qc = qite.propagate()
+   qc.draw(output='mpl')
+   plt.savefig('qite_circuit.png')
+   plt.close()
+   print(np.array(qite.alist).shape)
    print(ground_energy)
-   # print(ground_state)
+   plt.plot(np.arange(args.num_steps+1), ground_energy)
+   plt.savefig('qite_evolution.png')
+   plt.close()

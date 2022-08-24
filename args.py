@@ -1,4 +1,5 @@
 import argparse
+from types import SimpleNamespace
 
 def parse_args():
    parser = argparse.ArgumentParser(prog='QITE')
@@ -27,3 +28,16 @@ def parse_args():
 
    args = parser.parse_args()
    return args
+
+demo_args = SimpleNamespace(
+   model_name = 'QITE',
+   num_qubits = 1,
+   task = 'demo',
+   num_steps = 20,
+   shots = 1024,
+   db = 0.1,
+   delta = 0.1,
+   fpath = None,
+   log_interval = 10,
+   plot_type = 'none'
+)

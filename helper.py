@@ -27,10 +27,10 @@ def state_to_str(state: np.ndarray):
 def str_to_state(str_state, num_qubits):
    out = [int(str_state[i]) for i in range(len(str_state))]
    out += [0] * (num_qubits - len(str_state))
-   return np.array(out)
+   return tuple(out)
 
 def state_to_ind(state: np.ndarray):
-   n = state.shape[0]
+   n = len(state)
    bases = 4 ** np.arange(n)
    ind = int(np.sum(state * bases))
    return ind
