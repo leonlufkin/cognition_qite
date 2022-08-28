@@ -42,3 +42,11 @@ def ind_to_state(ind: int, num_qubits):
       q = r // (4 ** i)
       state[i] = int(q)
    return state
+
+def quarterize_(arr):
+   n = len(arr)
+   ind = np.array([np.arange(0,n/4, dtype=int), np.arange(n/4,n/2, dtype=int), np.arange(n/2,3*n/4, dtype=int), np.arange(3*n/4,n, dtype=int)])
+   return arr[ind]
+
+def quarterize(arr):
+   return np.apply_along_axis(quarterize_, -1, arr)
