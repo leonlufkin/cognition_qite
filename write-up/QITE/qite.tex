@@ -244,6 +244,8 @@ Take, for example, the left graph in \cref{fig:2x2}.
 QITE correctly evolves the state toward the ground state for the first 1.0 imaginary seconds of the simulation.
 However, after doing this, it appears to behave chaotically and evolves towards other states.
 Motta (2020) discuss this issue, but the behavior they describe sounds less chaotic.
+I believe this may be a matter of precision that can be addressed by collecting more shots.
+I will investigate this further in future experiments. 
 
 The QITE algorithm from Motta (2020) takes an extremely long time (at least one hour) to simulate on my machine for $8 \times 8$ Hamiltonians or larger.
 This stems from exponential number of expectation calculations ($e_I$) required to calculate $\hat{A}[m]$.
